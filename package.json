@@ -1,0 +1,34 @@
+{
+   "devDependencies": {
+      "@tsconfig/node20": "^20.1.6",
+      "@types/bcrypt": "^6.0.0",
+      "@types/cors": "^2.8.19",
+      "@types/express": "^5.0.3",
+      "@types/mailparser": "^3.4.6",
+      "@types/mongoose": "^5.11.96",
+      "@types/node": "^24.5.2",
+      "ts-node": "^10.9.2",
+      "ts-node-dev": "^2.0.0",
+      "typescript": "^5.9.2"
+   },
+   "dependencies": {
+      "@apollo/server": "^5.0.0",
+      "@as-integrations/express5": "^1.1.2",
+      "@elastic/elasticsearch": "^9.1.1",
+      "bcrypt": "^6.0.0",
+      "cors": "^2.8.5",
+      "dotenv": "^17.2.2",
+      "express": "^5.1.0",
+      "graphql": "^16.11.0",
+      "graphql-tag": "^2.12.6",
+      "imapflow": "^1.0.197",
+      "mailparser": "^3.7.4",
+      "moment": "^2.30.1",
+      "mongoose": "^8.18.2",
+      "node-fetch": "^3.3.2"
+   },
+   "scripts": {
+      "dev": "nodemon",
+      "build": "tsc && node dist/server.js"
+   }
+}
