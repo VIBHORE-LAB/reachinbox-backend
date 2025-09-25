@@ -2,12 +2,14 @@ import { ImapFlow } from "imapflow";
 import { simpleParser, AddressObject } from "mailparser";
 import { IAccount } from "../models/account.model";
 import { log } from "../utils/logger";
+import AiService from "./AIService";
+import NotificationService from "./NotificationService";
 
 const ELASTIC_URL = "http://127.0.0.1:9200";
 const INDEX_NAME = "emails";
 
 export class EmailService {
-  private activeConnections: Map<string, ImapFlow> = new Map();
+  private activeConnections: Map<string, { client: ImapFlow; lastUid: number }> = new Map();
 
   constructor() {
     this.ensureIndexExists();
@@ -36,6 +38,7 @@ export class EmailService {
                 suggestedReply: { type: "text" },
                 flags: { type: "keyword" },
                 fetchedAt: { type: "date" },
+                processed: { type: "boolean" }, // ✅ Added
               },
             },
           }),
@@ -53,75 +56,85 @@ export class EmailService {
     }
   }
 
-  async startImap(acc: IAccount) {
-    const accId = acc._id.toString();
-    if (this.activeConnections.has(accId)) return;
+async startImap(acc: IAccount) {
+  const accId = acc._id.toString();
+  if (this.activeConnections.has(accId)) return;
 
-    const client = new ImapFlow({
-      host: acc.host,
-      port: acc.port,
-      secure: true,
-      auth: { user: acc.user, pass: acc.password },
-    });
+  const client = new ImapFlow({
+    host: acc.host,
+    port: acc.port,
+    secure: true,
+    auth: { user: acc.user, pass: acc.password },
+  });
 
-    const connectAndListen = async () => {
-      try {
-        await client.connect();
-        log(`IMAP connected for ${acc.user}`);
-        await client.mailboxOpen("Inbox");
+  const connectAndListen = async () => {
+    try {
+      await client.connect();
+      log(`IMAP connected for ${acc.user}`);
+      await client.mailboxOpen("Inbox");
 
-        const messages = client.fetch(
-          { since: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-          { envelope: true, uid: true, flags: true, source: true }
-        );
+      let lastUid = 0;
+      const status = await client.status("Inbox", { uidNext: true });
+      if (status.uidNext) lastUid = status.uidNext - 1;
 
-        for await (const msg of messages) {
-          await this.indexEmail(acc, msg);
-        }
+      const messages = client.fetch(
+        { since: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+        { envelope: true, uid: true, flags: true, source: true }
+      );
 
-        client.on("exists", async () => {
-          try {
-            const uids = await client.search({ seen: false });
-if (!uids  || uids.length === 0) return;
+      for await (const msg of messages) {
+        await this.indexEmail(acc, msg);
+        if (msg.uid > lastUid) lastUid = msg.uid;
+      }
 
-            const newMessages = client.fetch(uids, {
+      client.on("exists", async () => {
+        try {
+          const uids = await client.search({ uid: `${lastUid + 1}:*` });
+          if (uids && uids.length > 0) {
+            for await (const msg of client.fetch(uids, {
               envelope: true,
               uid: true,
               flags: true,
               source: true,
-            });
-
-            for await (const msg of newMessages) {
+            })) {
               await this.indexEmail(acc, msg);
-              await client.messageFlagsAdd(msg.uid, ["\\Seen"]);
+              lastUid = msg.uid;
             }
-          } catch (err) {
-            log("Error fetching new messages:", err);
           }
-        });
-
-        while (true) {
-          try {
-            await client.idle();
-          } catch (err) {
-            log("Idle error, reconnecting...", err);
-            break;
-          }
+        } catch (err) {
+          log("Error fetching new messages:", err);
         }
-      } catch (err) {
-        log(`IMAP connection error for ${acc.user}:`, err);
-      } finally {
-        try {
-          await client.logout();
-        } catch {}
-        this.activeConnections.delete(accId);
-        setTimeout(connectAndListen, 5000);
-      }
-    };
+      });
 
-    this.activeConnections.set(accId, client);
-    connectAndListen();
-  }
+      client.on("close", () => {
+        log(`IMAP connection closed for ${acc.user}`);
+        this.activeConnections.delete(accId);
+        setTimeout(connectAndListen, 5000); // reconnect after 5s
+      });
+
+      while (true) {
+        try {
+          await client.idle();
+        } catch (err) {
+          log("Idle error, reconnecting...", err);
+          break;
+        }
+      }
+    } catch (err) {
+      log(`IMAP connection error for ${acc.user}:`, err);
+    } finally {
+      try {
+        await client.logout();
+      } catch {}
+      this.activeConnections.delete(accId);
+      setTimeout(connectAndListen, 5000); 
+    }
+  };
+
+  this.activeConnections.set(accId, { client, lastUid: 0 });
+  connectAndListen();
+}
+
 
   async getEmails(ownerId?: string, size = 50) {
     try {
@@ -142,11 +155,12 @@ if (!uids  || uids.length === 0) return;
 
       const data: any = await res.json();
 
-      // Map _id from Elasticsearch to id in GraphQL
-      return data.hits?.hits.map((hit: any) => ({
-        id: hit._id,
-        ...hit._source,
-      })) || [];
+      return (
+        data.hits?.hits.map((hit: any) => ({
+          id: hit._id,
+          ...hit._source,
+        })) || []
+      );
     } catch (err) {
       log("Error fetching emails from Elasticsearch", err);
       return [];
@@ -166,12 +180,11 @@ if (!uids  || uids.length === 0) return;
         return addr.value.map(v => v.address).filter((x): x is string => !!x);
       };
 
-  const flags: string[] = Array.isArray(msg.flags)
-  ? (msg.flags as (string | number)[]).map((f: string | number) => String(f))
-  : [];
+      const flags: string[] = Array.isArray(msg.flags)
+        ? (msg.flags as (string | number)[]).map((f: string | number) => String(f))
+        : [];
 
-
-      const emailDoc = {
+      const emailDoc: any = {
         ownerId: acc._id.toString(),
         account: acc.user,
         folder: "Inbox",
@@ -185,6 +198,7 @@ if (!uids  || uids.length === 0) return;
         suggestedReply: null,
         flags,
         fetchedAt: new Date().toISOString(),
+        processed: false,
       };
 
       const docId = `${acc._id}-${msg.uid}`;
@@ -200,9 +214,77 @@ if (!uids  || uids.length === 0) return;
         throw new Error(`Failed to index email UID ${msg.uid}: ${text}`);
       }
 
+      // ✅ Auto classify
+      if (!emailDoc.processed) {
+        const classification = await AiService.classifyEmail(
+          emailDoc.body,
+          emailDoc.subject,
+          emailDoc.from
+        );
+
+        emailDoc.labels = [classification.label];
+        emailDoc.processed = true;
+
+        await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${docId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(emailDoc),
+        });
+
+        if (classification.label === "Interested") {
+          NotificationService.notifyInterestedEmail(emailDoc);
+        }
+      }
+
       log(`Indexed email UID ${msg.uid} for ${acc.user}`);
     } catch (err) {
       log("Elasticsearch indexing error:", err);
     }
+  }
+
+  public async processUnprocessedEmails(ownerId?: string) {
+    let processedCount = 0;
+    try {
+      const query = ownerId
+        ? { query: { bool: { must: [{ term: { ownerId } }, { term: { processed: false } }] } }, size: 1000 }
+        : { query: { term: { processed: false } }, size: 1000 };
+
+      const res = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(query),
+      });
+
+      const data: any = await res.json();
+      const unprocessed = data.hits?.hits || [];
+
+      for (const hit of unprocessed) {
+        const emailDoc = hit._source;
+        const classification = await AiService.classifyEmail(
+          emailDoc.body,
+          emailDoc.subject,
+          emailDoc.from
+        );
+        emailDoc.labels = [classification.label];
+        emailDoc.processed = true;
+
+        await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${hit._id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(emailDoc),
+        });
+
+        if (classification.label === "Interested") {
+          NotificationService.notifyInterestedEmail(emailDoc);
+        }
+
+        processedCount++;
+      }
+    } catch (err) {
+      log("Error processing unprocessed emails:", err);
+    }
+
+    log(`Processed ${processedCount} unprocessed emails.`);
+    return processedCount;
   }
 }

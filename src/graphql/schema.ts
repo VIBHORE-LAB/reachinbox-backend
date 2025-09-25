@@ -30,7 +30,13 @@ export const typeDefs = gql`
     suggestedReply: String
     fetchedAt: String
     flags: [String!]
+    processed: Boolean
   }
+type ReprocessResult {
+  success: Boolean!
+  processedCount: Int
+}
+
 
   type Query {
     me: User
@@ -47,6 +53,8 @@ export const typeDefs = gql`
     startImap(demo: Boolean!, input: AccountInput): [Account!]!
     setLabel(emailId: ID!, label: String!): Email
     suggestReply(emailText: String!): String
+      reprocessUnprocessedEmails(ownerId: ID): ReprocessResult!
+
   }
 
   input AccountInput {
