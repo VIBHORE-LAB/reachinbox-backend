@@ -52,8 +52,9 @@ type ReprocessResult {
     addAccount(host: String!, port: Int!, user: String!, password: String!): Account
     startImap(demo: Boolean!, input: AccountInput): [Account!]!
     setLabel(emailId: ID!, label: String!): Email
-    suggestReply(emailText: String!): String
-      reprocessUnprocessedEmails(ownerId: ID): ReprocessResult!
+    reprocessUnprocessedEmails(ownerId: ID): ReprocessResult!
+      SuggestedReply(emailId: ID!): String
+  sendSuggestedReply(emailId: ID!, accountId: ID!): Boolean
 
   }
 

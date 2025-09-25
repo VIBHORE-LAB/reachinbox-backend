@@ -1,14 +1,15 @@
 import { MyContext } from "../server";
 import { EmailService } from "../services/EmailService";
+import { IAccount } from "../models/account.model";
 
 const emailService = new EmailService();
 
 export const emailResolvers = {
   Query: {
-    fetchEmails: async (_: any, args: { size?: number }, context:MyContext) => {
+    fetchEmails: async (_: any, args: { size?: number }, context: MyContext) => {
       try {
         const size = args.size || 50;
-        const ownerId = context.userId || undefined
+        const ownerId = context.userId || undefined;
         const emails = await emailService.getEmails(ownerId, size);
 
         return (emails || []).map((email: any) => ({
@@ -34,10 +35,34 @@ export const emailResolvers = {
       }
     },
   },
-Mutation: {
-  reprocessUnprocessedEmails: async (_: any, args: { ownerId?: string }) => {
-    const count = await emailService.processUnprocessedEmails(args.ownerId);
-    return { success: true, processedCount: count };
+
+  Mutation: {
+sendSuggestedReply: async (_: any, args: { emailId: string }, context: MyContext) => {
+  try {
+    const sent = await emailService.sendEmail(args.emailId);
+    return sent;
+  } catch (err) {
+    console.error("Error sending suggested reply:", err);
+    return false;
+  }
+},
+SuggestedReply: async (_: any, args: { emailId: string }, context: MyContext) => {
+    try {
+      const suggestedReply = await emailService.generateSuggestedReply(args.emailId);
+
+      if (!suggestedReply) {
+        console.error(`Failed to generate suggested reply for email ID ${args.emailId}`);
+        return false;
+      }
+
+      console.log(`Suggested reply generated for email ID ${args.emailId}`);
+      return true;
+    } catch (err) {
+      console.error("Error generating suggested reply:", err);
+      return false;
+    }
   },
-}
-}
+},
+
+  }
+

@@ -10,7 +10,7 @@ import { typeDefs } from "./graphql/schema";
 import { resolvers } from "./graphql";
 import { connectMongoose } from "./config/mongoose";
 import { log } from "./utils/logger";
-
+import { startAllDemoAccounts } from "./graphql/EmailInitializer";
 const PORT = process.env.PORT || 4000;
 
 export interface MyContext {
@@ -22,6 +22,7 @@ async function startServer() {
   const httpServer = http.createServer(app);
 
   await connectMongoose();
+  await startAllDemoAccounts();
 
   const server = new ApolloServer<MyContext>({
     typeDefs,

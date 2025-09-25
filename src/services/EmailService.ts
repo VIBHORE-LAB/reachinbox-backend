@@ -4,9 +4,24 @@ import { IAccount } from "../models/account.model";
 import { log } from "../utils/logger";
 import AiService from "./AIService";
 import NotificationService from "./NotificationService";
-
+import nodemailer from "nodemailer"
 const ELASTIC_URL = "http://127.0.0.1:9200";
 const INDEX_NAME = "emails";
+const POLL_INTERVAL = 15000;
+const DEMO_ACCOUNTS = [
+  {
+    user: process.env.DEMO_IMAP_USER1,
+    pass: process.env.DEMO_IMAP_PASS1,
+    host: "smtp.gmail.com",
+    port: 465,
+  },
+  {
+    user: process.env.DEMO_IMAP_USER2,
+    pass: process.env.DEMO_IMAP_PASS2,
+    host: "smtp.gmail.com",
+    port: 465,
+  },
+];
 
 export class EmailService {
   private activeConnections: Map<string, { client: ImapFlow; lastUid: number }> = new Map();
@@ -67,69 +82,49 @@ async startImap(acc: IAccount) {
     auth: { user: acc.user, pass: acc.password },
   });
 
-  const connectAndListen = async () => {
-    try {
-      await client.connect();
-      log(`IMAP connected for ${acc.user}`);
-      await client.mailboxOpen("Inbox");
+const connectAndListen = async () => {
+  try {
+    await client.connect();
+    log(`IMAP connected for ${acc.user}`);
+    await client.mailboxOpen("Inbox");
 
-      let lastUid = 0;
-      const status = await client.status("Inbox", { uidNext: true });
-      if (status.uidNext) lastUid = status.uidNext - 1;
+    let lastUid = 0;
+    const status = await client.status("Inbox", { uidNext: true });
+    if (status.uidNext) lastUid = status.uidNext - 1;
 
-      const messages = client.fetch(
-        { since: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-        { envelope: true, uid: true, flags: true, source: true }
-      );
-
-      for await (const msg of messages) {
-        await this.indexEmail(acc, msg);
-        if (msg.uid > lastUid) lastUid = msg.uid;
-      }
-
-      client.on("exists", async () => {
-        try {
-          const uids = await client.search({ uid: `${lastUid + 1}:*` });
-          if (uids && uids.length > 0) {
-            for await (const msg of client.fetch(uids, {
-              envelope: true,
-              uid: true,
-              flags: true,
-              source: true,
-            })) {
-              await this.indexEmail(acc, msg);
-              lastUid = msg.uid;
-            }
-          }
-        } catch (err) {
-          log("Error fetching new messages:", err);
-        }
-      });
-
-      client.on("close", () => {
-        log(`IMAP connection closed for ${acc.user}`);
-        this.activeConnections.delete(accId);
-        setTimeout(connectAndListen, 5000); // reconnect after 5s
-      });
-
-      while (true) {
-        try {
-          await client.idle();
-        } catch (err) {
-          log("Idle error, reconnecting...", err);
-          break;
-        }
-      }
-    } catch (err) {
-      log(`IMAP connection error for ${acc.user}:`, err);
-    } finally {
+    const fetchNewMessages = async () => {
       try {
-        await client.logout();
-      } catch {}
+        const uids = await client.search({ uid: `${lastUid + 1}:*` }) || [];
+        if (uids.length > 0) {
+          for await (const msg of client.fetch(uids, { envelope: true, uid: true, flags: true, source: true })) {
+            await this.indexEmail(acc, msg);
+            lastUid = msg.uid;
+          }
+        }
+      } catch (err) {
+        log("Error fetching new messages:", err);
+      }
+    };
+
+    await fetchNewMessages();
+
+    const pollLoop = setInterval(fetchNewMessages, POLL_INTERVAL);
+
+    client.on("close", () => {
+      log(`IMAP connection closed for ${acc.user}`);
+      clearInterval(pollLoop);
       this.activeConnections.delete(accId);
       setTimeout(connectAndListen, 5000); 
-    }
-  };
+    });
+
+  } catch (err) {
+    log(`IMAP connection error for ${acc.user}:`, err);
+    this.activeConnections.delete(accId);
+    setTimeout(connectAndListen, 5000); 
+  }
+};
+
+
 
   this.activeConnections.set(accId, { client, lastUid: 0 });
   connectAndListen();
@@ -214,13 +209,14 @@ async startImap(acc: IAccount) {
         throw new Error(`Failed to index email UID ${msg.uid}: ${text}`);
       }
 
-      // ✅ Auto classify
       if (!emailDoc.processed) {
         const classification = await AiService.classifyEmail(
           emailDoc.body,
           emailDoc.subject,
           emailDoc.from
         );
+
+        
 
         emailDoc.labels = [classification.label];
         emailDoc.processed = true;
@@ -287,4 +283,93 @@ async startImap(acc: IAccount) {
     log(`Processed ${processedCount} unprocessed emails.`);
     return processedCount;
   }
+
+
+  public async generateSuggestedReply(emailId: string){
+    try{
+      const res = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${emailId}`);
+      if (!res.ok) throw new Error(`Failed to fetch email: ${await res.text()}`);
+      const data: any = await res.json();
+      const emailDoc = data._source;
+
+      const suggestedReply = await AiService.generateReply(
+        emailDoc.body,
+        emailDoc.subject,
+        emailDoc.from
+      );
+
+      emailDoc.suggestedReply = suggestedReply;
+            await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${emailId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(emailDoc),
+      });
+
+        log(`Suggested reply generated for email ID ${emailId}`);
+      return suggestedReply;
+    } catch (err) {
+      log("Error generating suggested reply:", err);
+      return null;
+    }
+  }
+  
+public async sendEmail(emailId: string) {
+  try {
+    const res = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${emailId}`);
+    if (!res.ok) throw new Error(`Failed to fetch email: ${await res.text()}`);
+    const data: any = await res.json();
+    const emailDoc = data._source;
+
+    if (!emailDoc.suggestedReply) {
+      const suggestedReply = await AiService.generateReply(
+        emailDoc.body,
+        emailDoc.subject,
+        emailDoc.from
+      );
+
+      emailDoc.suggestedReply = suggestedReply;
+
+      await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${emailId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(emailDoc),
+      });
+
+      log(`Generated and stored suggested reply for email ID ${emailId}`);
+    }
+
+    const matchedAccount = DEMO_ACCOUNTS.find(acc =>
+      emailDoc.to.includes(acc.user)
+    );
+
+    if (!matchedAccount) {
+      throw new Error(
+        "Cannot send email: 'to' field does not match any allowed demo accounts."
+      );
+    }
+
+    const transporter = nodemailer.createTransport({
+      host: matchedAccount.host,
+      port: matchedAccount.port,
+      secure: true,
+      auth: {
+        user: matchedAccount.user!,
+        pass: matchedAccount.pass!,
+      },
+    });
+
+    await transporter.sendMail({
+      from: matchedAccount.user,
+      to: emailDoc.from, 
+      subject: `Re: ${emailDoc.subject}`,
+      text: emailDoc.suggestedReply,
+    });
+
+    log(`Email sent successfully to ${emailDoc.from} for email ID ${emailId}`);
+    return true;
+  } catch (err) {
+    log("Error sending email:", err);
+    throw err;
+  }
+}
 }

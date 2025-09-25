@@ -1,4 +1,3 @@
-// src/config/mongoose.ts
 import mongoose from "mongoose";
 import { log } from "../utils/logger";
 
