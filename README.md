@@ -22,19 +22,10 @@ This repository implements the backend for an Email Sync assignment. It:
 - [Project Overview](#project-overview)
 - [Technologies & Reasons](#technologies--reasons)
 - [Prerequisites](#prerequisites)
-- [Repository Layout](#repository-layout)
 - [Configuration (`.env`)](#configuration-env)
 - [Docker Compose (Services)](#docker-compose-services)
 - [Initial Setup & Run](#initial-setup--run)
-- [Preload Qdrant Training/Outreach Data](#preload-qdrant-trainingoutreach-data)
-- [GraphQL Endpoint & Example Queries/Mutations](#graphql-endpoint--example-queriesmutations)
-- [Security Notes](#security-notes)
-- [Production Recommendations & Scaling](#production-recommendations--scaling)
-- [Troubleshooting](#troubleshooting)
-- [Tests & Validation](#tests--validation)
-- [Useful npm Scripts](#useful-npm-scripts)
-- [Where to Go Next](#where-to-go-next)
-- [License](#license)
+-
 
 ---
 
@@ -68,11 +59,12 @@ High-level flow:
 | **Apollo Server (GraphQL)** | Flexible endpoint for queries/mutations; frontend can request only necessary fields |
 | **imapflow** | Modern IMAP client with robust IDLE support and streaming capabilities |
 | **mailparser** | Parses raw email sources into structured text, HTML, attachments, and headers |
+| **nodemailer** | Emails the suggested reply back to the source |
+
 | **Elasticsearch** | Full-text search, filtering, ranking, optimized for large datasets |
 | **MongoDB + Mongoose** | Flexible document storage for users and IMAP accounts |
 | **Qdrant (vector DB)** | Stores vector embeddings for RAG; simple HTTP API; fast nearest-neighbor search |
 | **OpenAI API** | Zero-shot classification, embeddings, and text generation |
-| **bcrypt** | Secure password hashing |
 | **Docker & Docker Compose** | Reproducible environment for Elasticsearch, Qdrant, and MongoDB |
 | **uuid** | Generate unique identifiers for emails/resources |
 | **axios / node-fetch** | HTTP client libraries for webhooks/Slack integration |
