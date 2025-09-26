@@ -54,7 +54,7 @@ type ReprocessResult {
     setLabel(emailId: ID!, label: String!): Email
     reprocessUnprocessedEmails(ownerId: ID): ReprocessResult!
       SuggestedReply(emailId: ID!): String
-  sendSuggestedReply(emailId: ID!, accountId: ID!): Boolean
+  sendSuggestedReply(emailId: ID!): String
 
   }
 

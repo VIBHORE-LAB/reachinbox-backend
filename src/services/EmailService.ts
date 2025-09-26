@@ -5,9 +5,11 @@ import { log } from "../utils/logger";
 import AiService from "./AIService";
 import NotificationService from "./NotificationService";
 import nodemailer from "nodemailer"
-const ELASTIC_URL = "http://127.0.0.1:9200";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+const ELASTIC_URL = process.env.ELASTIC_URL;
 const INDEX_NAME = "emails";
-const POLL_INTERVAL = 15000;
 const DEMO_ACCOUNTS = [
   {
     user: process.env.DEMO_IMAP_USER1,
@@ -53,7 +55,7 @@ export class EmailService {
                 suggestedReply: { type: "text" },
                 flags: { type: "keyword" },
                 fetchedAt: { type: "date" },
-                processed: { type: "boolean" }, // ✅ Added
+                processed: { type: "boolean" },
               },
             },
           }),
@@ -70,65 +72,111 @@ export class EmailService {
       log("Error ensuring Elasticsearch index exists:", err);
     }
   }
-
 async startImap(acc: IAccount) {
   const accId = acc._id.toString();
   if (this.activeConnections.has(accId)) return;
 
-  const client = new ImapFlow({
-    host: acc.host,
-    port: acc.port,
-    secure: true,
-    auth: { user: acc.user, pass: acc.password },
-  });
+  const connectAndListen = async () => {
+    const client = new ImapFlow({
+      host: acc.host,
+      port: acc.port,
+      secure: true,
+      auth: { user: acc.user, pass: acc.password },
+    });
 
-const connectAndListen = async () => {
-  try {
-    await client.connect();
-    log(`IMAP connected for ${acc.user}`);
-    await client.mailboxOpen("Inbox");
+    try {
+      await client.connect();
+      log(`IMAP connected for ${acc.user}`);
+      await client.mailboxOpen("Inbox");
 
-    let lastUid = 0;
-    const status = await client.status("Inbox", { uidNext: true });
-    if (status.uidNext) lastUid = status.uidNext - 1;
-
-    const fetchNewMessages = async () => {
+      let lastUid = 0;
       try {
-        const uids = await client.search({ uid: `${lastUid + 1}:*` }) || [];
-        if (uids.length > 0) {
-          for await (const msg of client.fetch(uids, { envelope: true, uid: true, flags: true, source: true })) {
-            await this.indexEmail(acc, msg);
-            lastUid = msg.uid;
+        const res = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_search`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            size: 1,
+            query: { term: { ownerId: acc._id.toString() } },
+            sort: [{ fetchedAt: { order: "desc" } }],
+          }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as any;
+          if (data.hits?.hits?.length > 0) {
+            const lastDocId = data.hits.hits[0]._id;
+            const parts = lastDocId.split("-");
+            lastUid = parseInt(parts[parts.length - 1], 10) || 0;
           }
         }
       } catch (err) {
-        log("Error fetching new messages:", err);
+        log("Failed to fetch last indexed UID, starting from 0", err);
       }
-    };
 
-    await fetchNewMessages();
+      
+      this.activeConnections.set(accId, { client, lastUid });
 
-    const pollLoop = setInterval(fetchNewMessages, POLL_INTERVAL);
+      // Fetch new messages
+      const fetchNewMessages = async () => {
+        try {
+          const uids = (await client.search({ uid: `${lastUid + 1}:*` })) || [];
+          if (uids.length > 0) {
+            for await (const msg of client.fetch(uids, { envelope: true, uid: true, flags: true, source: true })) {
+              await this.indexEmail(acc, msg);
+              lastUid = msg.uid; // Update only after indexing
+              this.activeConnections.set(accId, { client, lastUid });
+            }
+          }
+        } catch (err) {
+          log("Error fetching new messages:", err);
+        }
+      };
 
-    client.on("close", () => {
-      log(`IMAP connection closed for ${acc.user}`);
-      clearInterval(pollLoop);
+      // Initial fetch
+      await fetchNewMessages();
+
+      // Use IMAP IDLE for live updates
+      const idleLoop = async () => {
+        try {
+          // Start IDLE state
+          await client.idle();
+          // IDLE state ended (e.g., server timeout or interruption)
+          log(`IDLE state ended for ${acc.user}`);
+          // Fetch any new messages that arrived during IDLE
+          await fetchNewMessages();
+          // Restart IDLE immediately
+          setImmediate(idleLoop);
+        } catch (err) {
+          log(`IDLE error for ${acc.user}:`, err);
+          // Restart IDLE after a short delay to avoid rapid retries
+          setTimeout(idleLoop, 5000);
+        }
+      };
+
+      // Set up event listener for new emails
+      client.on("exists", async () => {
+        log(`New email detected for ${acc.user}`);
+        await fetchNewMessages();
+      });
+
+      // Start the IDLE loop
+      idleLoop();
+
+      client.on("close", () => {
+        log(`IMAP connection closed for ${acc.user}`);
+        this.activeConnections.delete(accId);
+        setTimeout(connectAndListen, 5000);
+      });
+
+    } catch (err) {
+      log(`IMAP connection error for ${acc.user}:`, err);
       this.activeConnections.delete(accId);
-      setTimeout(connectAndListen, 5000); 
-    });
+      setTimeout(connectAndListen, 5000);
+    }
+  };
 
-  } catch (err) {
-    log(`IMAP connection error for ${acc.user}:`, err);
-    this.activeConnections.delete(accId);
-    setTimeout(connectAndListen, 5000); 
-  }
-};
-
-
-
-  this.activeConnections.set(accId, { client, lastUid: 0 });
   connectAndListen();
 }
+
 
 
   async getEmails(ownerId?: string, size = 50) {
@@ -162,81 +210,87 @@ const connectAndListen = async () => {
     }
   }
 
-  private async indexEmail(acc: IAccount, msg: any) {
-    try {
-      const rawBody = msg.source?.toString("utf8") || "";
-      const parsed = await simpleParser(rawBody);
+private async indexEmail(acc: IAccount, msg: any) {
+  try {
+    const rawBody = msg.source?.toString("utf8") || "";
+    const parsed = await simpleParser(rawBody);
 
-      const formatAddresses = (addr?: AddressObject | AddressObject[]): string[] => {
-        if (!addr) return [];
-        if (Array.isArray(addr)) {
-          return addr.flatMap(a => a.value.map(v => v.address).filter((x): x is string => !!x));
-        }
-        return addr.value.map(v => v.address).filter((x): x is string => !!x);
-      };
-
-      const flags: string[] = Array.isArray(msg.flags)
-        ? (msg.flags as (string | number)[]).map((f: string | number) => String(f))
-        : [];
-
-      const emailDoc: any = {
-        ownerId: acc._id.toString(),
-        account: acc.user,
-        folder: "Inbox",
-        subject: parsed.subject || "(No Subject)",
-        from: formatAddresses(parsed.from).join(", "),
-        to: formatAddresses(parsed.to),
-        date: parsed.date?.toISOString() || new Date().toISOString(),
-        body: parsed.text || parsed.html || "",
-        snippet: (parsed.text || parsed.html || "").slice(0, 200),
-        labels: [],
-        suggestedReply: null,
-        flags,
-        fetchedAt: new Date().toISOString(),
-        processed: false,
-      };
-
-      const docId = `${acc._id}-${msg.uid}`;
-
-      const res = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${docId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(emailDoc),
-      });
-
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Failed to index email UID ${msg.uid}: ${text}`);
+    const formatAddresses = (addr?: AddressObject | AddressObject[]): string[] => {
+      if (!addr) return [];
+      if (Array.isArray(addr)) {
+        return addr.flatMap(a => a.value.map(v => v.address).filter((x): x is string => !!x));
       }
+      return addr.value.map(v => v.address).filter((x): x is string => !!x);
+    };
 
-      if (!emailDoc.processed) {
-        const classification = await AiService.classifyEmail(
-          emailDoc.body,
-          emailDoc.subject,
-          emailDoc.from
-        );
+    const flags: string[] = Array.isArray(msg.flags)
+      ? (msg.flags as (string | number)[]).map((f: string | number) => String(f))
+      : [];
 
-        
+    const docId = `${acc._id}-${msg.uid}`;
 
-        emailDoc.labels = [classification.label];
-        emailDoc.processed = true;
-
-        await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${docId}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(emailDoc),
-        });
-
-        if (classification.label === "Interested") {
-          NotificationService.notifyInterestedEmail(emailDoc);
-        }
-      }
-
-      log(`Indexed email UID ${msg.uid} for ${acc.user}`);
-    } catch (err) {
-      log("Elasticsearch indexing error:", err);
-    }
+const existing = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${docId}`);
+if (existing.ok) {
+  const existingDoc = (await existing.json()) as { _source?: { processed?: boolean } };
+  if (existingDoc._source?.processed) {
+    log(`Email UID ${msg.uid} already processed, skipping`);
+    return;
   }
+}
+
+
+
+    const emailDoc: any = {
+      ownerId: acc._id.toString(),
+      account: acc.user,
+      folder: "Inbox",
+      subject: parsed.subject || "(No Subject)",
+      from: formatAddresses(parsed.from).join(", "),
+      to: formatAddresses(parsed.to),
+      date: parsed.date?.toISOString() || new Date().toISOString(),
+      body: parsed.text || parsed.html || "",
+      snippet: (parsed.text || parsed.html || "").slice(0, 200),
+      labels: [],
+      suggestedReply: null,
+      flags,
+      fetchedAt: new Date().toISOString(),
+      processed: false,
+    };
+
+    // classify email
+    const classification = await AiService.classifyEmail(
+      emailDoc.body,
+      emailDoc.subject,
+      emailDoc.from
+    );
+
+    if (classification) {
+      emailDoc.labels = [classification.label];
+      emailDoc.processed = true; // 👉 mark processed
+
+      if (classification.label === "Interested") {
+        NotificationService.notifyInterestedEmail(emailDoc);
+      }
+    }
+
+    const res = await fetch(`${ELASTIC_URL}/${INDEX_NAME}/_doc/${docId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(emailDoc),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to index email UID ${msg.uid}: ${text}`);
+    }
+
+    log(`Indexed & processed email UID ${msg.uid} for ${acc.user}`);
+  } catch (err) {
+    log("Elasticsearch indexing error:", err);
+  }
+}
+
+
 
   public async processUnprocessedEmails(ownerId?: string) {
     let processedCount = 0;

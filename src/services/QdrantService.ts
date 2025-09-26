@@ -1,18 +1,21 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { v4 as uuidv4 } from 'uuid';
 import aiService from './AIService';
+import * as dotenv from "dotenv";
 
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+dotenv.config();
+const QDRANT_URL = process.env.QDRANT_URL;
+const apiKey = process.env.QDRANT_API_KEY
 const COLLECTION_NAME = 'email_suggestions';
 const BATCH_SIZE = 10;
 
-const qdrant = new QdrantClient({ url: QDRANT_URL });
+const qdrant = new QdrantClient({ url: QDRANT_URL, apiKey:apiKey });
 
 export class QdrantRAGService {
   static async initCollection() {
     try {
      await qdrant.recreateCollection(COLLECTION_NAME, {
-  vectors: { size: 10, distance: 'Cosine' },
+  vectors: { size: 1536, distance: 'Cosine' },
 });
 
       console.log('Qdrant collection initialized');

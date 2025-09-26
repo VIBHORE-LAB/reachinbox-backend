@@ -56,7 +56,7 @@ SuggestedReply: async (_: any, args: { emailId: string }, context: MyContext) =>
       }
 
       console.log(`Suggested reply generated for email ID ${args.emailId}`);
-      return true;
+      return suggestedReply;
     } catch (err) {
       console.error("Error generating suggested reply:", err);
       return false;

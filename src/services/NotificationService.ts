@@ -1,5 +1,7 @@
 import fetch from "node-fetch";
+import * as dotenv from "dotenv";
 
+dotenv.config();
 const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK || "";
 const EXTERNAL_WEBHOOK = process.env.EXTERNAL_WEBHOOK || "";
 
