@@ -47,6 +47,9 @@ const fetchElastic = async (path: string, options: any = {}) => {
   });
 
   if (!res.ok) {
+    // Handle 404 for GET _doc gracefully
+    if (res.status === 404 && path.includes("_doc/")) return null;
+
     const text = await res.text();
     throw new Error(`Elasticsearch request failed: ${text}`);
   }
@@ -205,7 +208,7 @@ export class EmailService {
       const docId = `${acc._id}-${msg.uid}`;
 
       const existing: any = await fetchElastic(`/${INDEX_NAME}/_doc/${docId}`);
-      if (existing._source?.processed) return;
+      if (existing?._source?.processed) return; // Skip if already processed
 
       const emailDoc: any = {
         ownerId: acc._id.toString(),
@@ -273,6 +276,7 @@ export class EmailService {
   public async generateSuggestedReply(emailId: string) {
     try {
       const data: any = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
+      if (!data?._source) throw new Error("Email not found");
       const emailDoc = data._source;
 
       const suggestedReply = await AiService.generateReply(
@@ -300,6 +304,7 @@ export class EmailService {
   public async sendEmail(emailId: string) {
     try {
       const data: any = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
+      if (!data?._source) throw new Error("Email not found");
       const emailDoc = data._source;
 
       if (!emailDoc.suggestedReply) {
