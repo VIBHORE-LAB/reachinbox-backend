@@ -9,12 +9,13 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
-// Elasticsearch config
-const ELASTIC_URL = process.env.ELASTIC_URL!; // e.g., https://na-search-868278038.us-east-1.bonsaisearch.net
+// --- Elasticsearch config ---
+const ELASTIC_URL = process.env.ELASTIC_URL!.replace(/:\d+$/, ""); // remove port if included
 const ELASTIC_USER = process.env.ELASTIC_USER!;
 const ELASTIC_PASS = process.env.ELASTIC_PASS!;
 const INDEX_NAME = "emails";
 
+// --- Demo accounts for sending emails ---
 const DEMO_ACCOUNTS = [
   {
     user: process.env.DEMO_IMAP_USER1,
@@ -30,12 +31,13 @@ const DEMO_ACCOUNTS = [
   },
 ];
 
-// --- Helper for Elasticsearch fetch with Basic Auth ---
+// --- Helper: Basic Auth header ---
 const getAuthHeader = () =>
   "Basic " + Buffer.from(`${ELASTIC_USER}:${ELASTIC_PASS}`).toString("base64");
 
-const fetchElastic = async (url: string, options: any = {}) => {
-  const res = await fetch(`${ELASTIC_URL}${url}`, {
+// --- Helper: Fetch Elasticsearch safely ---
+const fetchElastic = async (path: string, options: any = {}) => {
+  const res = await fetch(`${ELASTIC_URL}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -50,9 +52,7 @@ const fetchElastic = async (url: string, options: any = {}) => {
   }
 
   const contentType = res.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    return res.json();
-  }
+  if (contentType.includes("application/json")) return res.json();
   return res.text();
 };
 
@@ -64,13 +64,13 @@ export class EmailService {
     this.ensureIndexExists();
   }
 
+  // Ensure the Elasticsearch index exists
   private async ensureIndexExists() {
     try {
-      const res: any = await fetchElastic(`/${INDEX_NAME}`);
+      await fetchElastic(`/${INDEX_NAME}`);
     } catch (err: any) {
-      // If index does not exist, create it
       if (err.message.includes("index_not_found_exception")) {
-        const createRes = await fetchElastic(`/${INDEX_NAME}`, {
+        await fetchElastic(`/${INDEX_NAME}`, {
           method: "PUT",
           body: JSON.stringify({
             mappings: {
@@ -100,6 +100,7 @@ export class EmailService {
     }
   }
 
+  // Start IMAP connection for an account
   public async startImap(acc: IAccount) {
     const accId = acc._id.toString();
     if (this.activeConnections.has(accId)) return;
@@ -119,6 +120,7 @@ export class EmailService {
 
         let lastUid = 0;
 
+        // Fetch last indexed UID from Elasticsearch
         try {
           const data: any = await fetchElastic(`/${INDEX_NAME}/_search`, {
             method: "POST",
@@ -165,10 +167,7 @@ export class EmailService {
           }
         };
 
-        client.on("exists", async () => {
-          await fetchNewMessages();
-        });
-
+        client.on("exists", async () => await fetchNewMessages());
         idleLoop();
 
         client.on("close", () => {
@@ -185,6 +184,7 @@ export class EmailService {
     connectAndListen();
   }
 
+  // Index a single email in Elasticsearch
   private async indexEmail(acc: IAccount, msg: any) {
     try {
       const rawBody = msg.source?.toString("utf8") || "";
@@ -250,6 +250,7 @@ export class EmailService {
     }
   }
 
+  // Fetch emails from Elasticsearch
   public async getEmails(ownerId?: string, size = 50) {
     try {
       const query = ownerId
@@ -268,6 +269,7 @@ export class EmailService {
     }
   }
 
+  // Generate suggested reply
   public async generateSuggestedReply(emailId: string) {
     try {
       const data: any = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
@@ -294,6 +296,7 @@ export class EmailService {
     }
   }
 
+  // Send email via demo account
   public async sendEmail(emailId: string) {
     try {
       const data: any = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
