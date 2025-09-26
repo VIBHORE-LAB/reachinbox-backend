@@ -9,7 +9,8 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
-const ELASTIC_URL = process.env.ELASTIC_URL!;
+// Elasticsearch config
+const ELASTIC_URL = process.env.ELASTIC_URL!; // e.g., https://na-search-868278038.us-east-1.bonsaisearch.net
 const ELASTIC_USER = process.env.ELASTIC_USER!;
 const ELASTIC_PASS = process.env.ELASTIC_PASS!;
 const INDEX_NAME = "emails";
@@ -29,12 +30,12 @@ const DEMO_ACCOUNTS = [
   },
 ];
 
-// Helper for Elasticsearch fetch with Basic Auth
+// --- Helper for Elasticsearch fetch with Basic Auth ---
 const getAuthHeader = () =>
   "Basic " + Buffer.from(`${ELASTIC_USER}:${ELASTIC_PASS}`).toString("base64");
 
-const fetchElastic = (url: string, options: any = {}) =>
-  fetch(`${ELASTIC_URL}${url}`, {
+const fetchElastic = async (url: string, options: any = {}) => {
+  const res = await fetch(`${ELASTIC_URL}${url}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -43,6 +44,19 @@ const fetchElastic = (url: string, options: any = {}) =>
     },
   });
 
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Elasticsearch request failed: ${text}`);
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return res.json();
+  }
+  return res.text();
+};
+
+// --- EmailService class ---
 export class EmailService {
   private activeConnections: Map<string, { client: ImapFlow; lastUid: number }> = new Map();
 
@@ -52,8 +66,10 @@ export class EmailService {
 
   private async ensureIndexExists() {
     try {
-      const res = await fetchElastic(`/${INDEX_NAME}`);
-      if (res.status === 404) {
+      const res: any = await fetchElastic(`/${INDEX_NAME}`);
+    } catch (err: any) {
+      // If index does not exist, create it
+      if (err.message.includes("index_not_found_exception")) {
         const createRes = await fetchElastic(`/${INDEX_NAME}`, {
           method: "PUT",
           body: JSON.stringify({
@@ -77,16 +93,10 @@ export class EmailService {
             },
           }),
         });
-
-        if (!createRes.ok) {
-          const text = await createRes.text();
-          throw new Error(`Failed to create index: ${text}`);
-        }
-
         log("Created Elasticsearch index: emails");
+      } else {
+        log("Error ensuring Elasticsearch index exists:", err);
       }
-    } catch (err) {
-      log("Error ensuring Elasticsearch index exists:", err);
     }
   }
 
@@ -110,7 +120,7 @@ export class EmailService {
         let lastUid = 0;
 
         try {
-          const res = await fetchElastic(`/${INDEX_NAME}/_search`, {
+          const data: any = await fetchElastic(`/${INDEX_NAME}/_search`, {
             method: "POST",
             body: JSON.stringify({
               size: 1,
@@ -118,13 +128,10 @@ export class EmailService {
               sort: [{ fetchedAt: { order: "desc" } }],
             }),
           });
-          if (res.ok) {
-            const data = (await res.json()) as any;
-            if (data.hits?.hits?.length > 0) {
-              const lastDocId = data.hits.hits[0]._id;
-              const parts = lastDocId.split("-");
-              lastUid = parseInt(parts[parts.length - 1], 10) || 0;
-            }
+          if (data.hits?.hits?.length > 0) {
+            const lastDocId = data.hits.hits[0]._id;
+            const parts = lastDocId.split("-");
+            lastUid = parseInt(parts[parts.length - 1], 10) || 0;
           }
         } catch (err) {
           log("Failed to fetch last indexed UID, starting from 0", err);
@@ -135,12 +142,10 @@ export class EmailService {
         const fetchNewMessages = async () => {
           try {
             const uids = (await client.search({ uid: `${lastUid + 1}:*` })) || [];
-            if (uids.length > 0) {
-              for await (const msg of client.fetch(uids, { envelope: true, uid: true, flags: true, source: true })) {
-                await this.indexEmail(acc, msg);
-                lastUid = msg.uid;
-                this.activeConnections.set(accId, { client, lastUid });
-              }
+            for await (const msg of client.fetch(uids, { envelope: true, uid: true, flags: true, source: true })) {
+              await this.indexEmail(acc, msg);
+              lastUid = msg.uid;
+              this.activeConnections.set(accId, { client, lastUid });
             }
           } catch (err) {
             log("Error fetching new messages:", err);
@@ -152,7 +157,6 @@ export class EmailService {
         const idleLoop = async () => {
           try {
             await client.idle();
-            log(`IDLE state ended for ${acc.user}`);
             await fetchNewMessages();
             setImmediate(idleLoop);
           } catch (err) {
@@ -162,18 +166,15 @@ export class EmailService {
         };
 
         client.on("exists", async () => {
-          log(`New email detected for ${acc.user}`);
           await fetchNewMessages();
         });
 
         idleLoop();
 
         client.on("close", () => {
-          log(`IMAP connection closed for ${acc.user}`);
           this.activeConnections.delete(accId);
           setTimeout(connectAndListen, 5000);
         });
-
       } catch (err) {
         log(`IMAP connection error for ${acc.user}:`, err);
         this.activeConnections.delete(accId);
@@ -203,11 +204,8 @@ export class EmailService {
 
       const docId = `${acc._id}-${msg.uid}`;
 
-      const existing = await fetchElastic(`/${INDEX_NAME}/_doc/${docId}`);
-      if (existing.ok) {
-        const existingDoc = (await existing.json()) as { _source?: { processed?: boolean } };
-        if (existingDoc._source?.processed) return;
-      }
+      const existing: any = await fetchElastic(`/${INDEX_NAME}/_doc/${docId}`);
+      if (existing._source?.processed) return;
 
       const emailDoc: any = {
         ownerId: acc._id.toString(),
@@ -241,15 +239,10 @@ export class EmailService {
         }
       }
 
-      const res = await fetchElastic(`/${INDEX_NAME}/_doc/${docId}`, {
+      await fetchElastic(`/${INDEX_NAME}/_doc/${docId}`, {
         method: "PUT",
         body: JSON.stringify(emailDoc),
       });
-
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Failed to index email UID ${msg.uid}: ${text}`);
-      }
 
       log(`Indexed & processed email UID ${msg.uid} for ${acc.user}`);
     } catch (err) {
@@ -263,14 +256,10 @@ export class EmailService {
         ? { query: { term: { ownerId } }, size, sort: [{ fetchedAt: { order: "desc" } }] }
         : { query: { match_all: {} }, size, sort: [{ fetchedAt: { order: "desc" } }] };
 
-      const res = await fetchElastic(`/${INDEX_NAME}/_search`, {
+      const data: any = await fetchElastic(`/${INDEX_NAME}/_search`, {
         method: "POST",
         body: JSON.stringify(query),
       });
-
-      if (!res.ok) throw new Error(await res.text());
-
-      const data: any = await res.json();
 
       return data.hits?.hits.map((hit: any) => ({ id: hit._id, ...hit._source })) || [];
     } catch (err) {
@@ -281,9 +270,7 @@ export class EmailService {
 
   public async generateSuggestedReply(emailId: string) {
     try {
-      const res = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
-      if (!res.ok) throw new Error(await res.text());
-      const data: any = await res.json();
+      const data: any = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
       const emailDoc = data._source;
 
       const suggestedReply = await AiService.generateReply(
@@ -309,9 +296,7 @@ export class EmailService {
 
   public async sendEmail(emailId: string) {
     try {
-      const res = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
-      if (!res.ok) throw new Error(await res.text());
-      const data: any = await res.json();
+      const data: any = await fetchElastic(`/${INDEX_NAME}/_doc/${emailId}`);
       const emailDoc = data._source;
 
       if (!emailDoc.suggestedReply) {
