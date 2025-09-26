@@ -1,129 +1,112 @@
-\# Email Sync Backend
+# Email Sync Backend
 
-\*\*Purpose\*\*
+**Purpose**  
 
-This repository implements the backend for an Email Sync assignment: it synchronizes IMAP accounts in real time (IDLE), indexes emails into Elasticsearch for search, runs zero-shot AI categorization, stores vectors for Retrieval-Augmented Generation (RAG) in Qdrant, notifies via Slack / external webhooks on "Interested" emails, and exposes a GraphQL API (Apollo Server) for clients (frontend or Postman) to manage accounts and query/search emails. MongoDB is used to persist user and account records.
+This repository implements the backend for an Email Sync assignment. It:
 
-\---
+- Synchronizes IMAP accounts in real-time (IDLE)
+- Indexes emails into Elasticsearch for search
+- Runs zero-shot AI categorization
+- Stores vectors for Retrieval-Augmented Generation (RAG) in Qdrant
+- Notifies via Slack / external webhooks on "Interested" emails
+- Exposes a GraphQL API (Apollo Server) for clients (frontend or Postman) to manage accounts and query/search emails
+- Uses MongoDB to persist user and account records
 
-\*\*Frontend Repo\*\*
-**Frontend Repository**: Access the frontend repository [here](https://github.com/VIBHORE-LAB/reach-Inbox-Frontend).
+---
 
-\## Table of contents
+**Frontend Repo**  
+[Access the frontend repository here](#)
 
-\- Project overview
+## Table of Contents
 
-\- Technologies & reasons
+- [Project Overview](#project-overview)
+- [Technologies & Reasons](#technologies--reasons)
+- [Prerequisites](#prerequisites)
+- [Repository Layout](#repository-layout)
+- [Configuration (`.env`)](#configuration-env)
+- [Docker Compose (Services)](#docker-compose-services)
+- [Initial Setup & Run](#initial-setup--run)
+- [Preload Qdrant Training/Outreach Data](#preload-qdrant-trainingoutreach-data)
+- [GraphQL Endpoint & Example Queries/Mutations](#graphql-endpoint--example-queriesmutations)
+- [Security Notes](#security-notes)
+- [Production Recommendations & Scaling](#production-recommendations--scaling)
+- [Troubleshooting](#troubleshooting)
+- [Tests & Validation](#tests--validation)
+- [Useful npm Scripts](#useful-npm-scripts)
+- [Where to Go Next](#where-to-go-next)
+- [License](#license)
 
-\- Prerequisites
+---
 
-\- Repository layout
-
-\- Configuration (\`.env\`)
-
-\- Docker Compose (services)
-
-\- Initial setup & run
-
-\- Preload Qdrant training/outreach data
-
-\- GraphQL endpoint & example queries/mutations
-
-\- Security notes
-
-\- Production recommendations & scaling
-
-\- Troubleshooting
-
-\- Tests & validation
-
-\- Useful npm scripts
-
-\- Where to go next
-
-\- License
-
-\---
-
-\## Project overview
+## Project Overview
 
 High-level flow:
 
-1\. A user registers / logs in.
+1. User registers or logs in.
+2. User adds one or more IMAP accounts (or uses demo accounts).
+3. `ImapService` keeps persistent IMAP connections (IDLE) and:
+   - Fetches last 30 days of email history
+   - Parses emails with `mailparser`
+   - Indexes email documents into Elasticsearch
+   - Embeds email body and upserts into Qdrant
+   - Runs OpenAI zero-shot classification
+   - Triggers Slack/webhook notifications when label is `Interested`
+   - Allows generating AI-suggested replies which can be sent back to original senders
+4. Clients interact with the backend via GraphQL (`/graphql`) to:
+   - Read emails
+   - Set labels
+   - Request suggested replies (RAG)
+   - Manage accounts
 
-2\. User adds one or more IMAP accounts (or uses demo accounts).
+---
 
-3\. \`ImapService\` keeps persistent IMAP connections (IDLE) and:
+## Technologies & Reasons
 
-\- fetches last 30 days history,
+| Technology | Reason |
+|------------|--------|
+| **Node.js + TypeScript** | Async IO for network-bound services; TypeScript adds static typing for maintainability |
+| **Apollo Server (GraphQL)** | Flexible endpoint for queries/mutations; frontend can request only necessary fields |
+| **imapflow** | Modern IMAP client with robust IDLE support and streaming capabilities |
+| **mailparser** | Parses raw email sources into structured text, HTML, attachments, and headers |
+| **Elasticsearch** | Full-text search, filtering, ranking, optimized for large datasets |
+| **MongoDB + Mongoose** | Flexible document storage for users and IMAP accounts |
+| **Qdrant (vector DB)** | Stores vector embeddings for RAG; simple HTTP API; fast nearest-neighbor search |
+| **OpenAI API** | Zero-shot classification, embeddings, and text generation |
+| **bcrypt** | Secure password hashing |
+| **Docker & Docker Compose** | Reproducible environment for Elasticsearch, Qdrant, and MongoDB |
+| **uuid** | Generate unique identifiers for emails/resources |
+| **axios / node-fetch** | HTTP client libraries for webhooks/Slack integration |
 
-\- parses with \`mailparser\`,
+---
 
-\- indexes email documents into Elasticsearch,
+## Prerequisites
 
-\- embeds email body and upserts into Qdrant,
+- Node.js >= 18
+- Docker & Docker Compose
+- OpenAI API key
+- Elasticsearch instance
+- Qdrant instance
+- MongoDB instance
 
-\- runs an OpenAI zero-shot classification,
+---
+## Docker Compose (Services)
 
-\- triggers Slack/webhook when label is \`Interested\`.
+- MongoDB
+- Elasticsearch
+- Qdrant
 
-\- The user can choose to generate a AI suggested reply and then mail back that to the original sender
+---
 
-4\. Client talks to the backend via the GraphQL endpoint (\`/graphql\`) to read emails, set labels, request suggested replies (RAG), and manage accounts.
+## Initial Setup & Run
 
-\---
+```bash
+# Install dependencies
+npm install
 
-\## Technologies & why they were used
+# Start services
+docker-compose up -d
 
-Every technology included and the reason:
+# Run backend
+npm run dev
 
-\- \*\*Node.js + TypeScript\*\*
-
-\- Reason: performant async IO for network-bound services (IMAP, HTTP). TypeScript adds static typing which improves maintainability and reduces subtle runtime bugs.
-
-\- \*\*Apollo Server (GraphQL)\*\*
-
-\- Reason: single, flexible endpoint for queries and mutations. Frontend can request exactly the fields needed and the API grows more cleanly than many REST endpoints.
-
-\- \*\*imapflow\*\*
-
-\- Reason: modern IMAP client with robust support for IDLE (persistent connections). It is reliable for long-lived IMAP sessions and provides streaming capabilities.
-
-\- \*\*mailparser\*\*
-
-\- Reason: robust parsing of raw email sources into structured text, HTML, attachments, headers.
-
-\- \*\*Elasticsearch\*\*
-
-\- Reason: specialized search engine optimised for full-text search, filtering, ranking, and large datasets. Ideal as the canonical store for email documents that need fast, expressive search.
-
-\- \*\*MongoDB + Mongoose\*\*
-
-\- Reason: flexible document storage for user accounts and IMAP account credentials (owner relationships). Simple to model user/account entities and durable across restarts.
-
-\- \*\*Qdrant (vector DB)\*\*
-
-\- Reason: stores vector embeddings for RAG. Qdrant has a simple HTTP API and good performance for nearest-neighbor search for text embeddings.
-
-\- \*\*OpenAI (hosted API)\*\*
-
-\- Reason: zero-shot classification, embeddings, and text generation without the need to train models locally. Fast to integrate and high-quality language capabilities.
-
-\- \*\*bcrypt\*\*
-
-\- Reason: secure password hashing for user accounts.
-
-\- \*\*Docker & Docker Compose\*\*
-
-\- Reason: reproducible local environment for Elasticsearch, Qdrant, and MongoDB.
-
-\- \*\*uuid\*\*
-
-\- Reason: generate unique identifiers for emails or other resources.
-
-\- \*\*axios / node-fetch\*\*
-
-\- Reason: HTTP client libraries for webhook/Slack integration and other HTTP side effects.
-
-\---
 
