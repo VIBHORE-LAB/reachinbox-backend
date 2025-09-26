@@ -14,9 +14,8 @@ This repository implements the backend for an Email Sync assignment. It:
 
 ---
 
-**Frontend Repo**  
-[Access the frontend repository here](#)
-
+**Frontend Repository**: 
+Access the frontend repository [here](https://github.com/VIBHORE-LAB/reach-Inbox-Frontend).
 ## Table of Contents
 
 - [Project Overview](#project-overview)
